@@ -1,3 +1,6 @@
+import time
+import numpy as np
+import cv2
 from src.algorithms import (
     gamma_correction, adjust_contrast, mean_filter, median_filter,
     add_gaussian_noise, add_salt_pepper_noise, sobel_edges, sobel_display,
@@ -23,8 +26,43 @@ def _transform_reference(reference, settings):
     )
 
 
+def compute_difference_map(img_a, img_b, mode="amp3"):
+    """Tính ảnh sai khác (Difference Image) giữa hai ảnh.
+    
+    Hỗ trợ các chế độ hiển thị:
+    - 'raw': Giá trị sai lệch tuyệt đối nguyên bản |A - B| (1x).
+    - 'amp3': Khuếch đại 3x (mặc định) giúp mắt người dễ quan sát sai lệch nhỏ.
+    - 'amp5': Khuếch đại 5x.
+    - 'norm': Chuẩn hóa cực đại (Normalize min-max về 0-255).
+    - 'heatmap': Bản đồ nhiệt (Heatmap / Colormap) thể hiện độ lớn sai khác.
+    """
+    diff = np.abs(img_a.astype(np.int16) - img_b.astype(np.int16)).astype(np.uint8)
+    if mode == "raw":
+        return diff
+    elif mode == "amp3":
+        return np.clip(diff.astype(np.int16) * 3, 0, 255).astype(np.uint8)
+    elif mode == "amp5":
+        return np.clip(diff.astype(np.int16) * 5, 0, 255).astype(np.uint8)
+    elif mode == "norm":
+        max_val = int(np.max(diff))
+        if max_val > 0:
+            return np.clip(np.rint(diff.astype(np.float64) * (255.0 / max_val)), 0, 255).astype(np.uint8)
+        return diff
+    elif mode == "heatmap":
+        # Chuyển sang ảnh xám trước nếu là ảnh màu rồi map sang JET / INFERNO
+        if diff.ndim == 3 and diff.shape[2] == 3:
+            gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_diff = diff
+        # Khuếch đại nhẹ để heatmap rực rỡ hơn
+        amp = np.clip(gray_diff.astype(np.int16) * 3, 0, 255).astype(np.uint8)
+        return cv2.applyColorMap(amp, cv2.COLORMAP_INFERNO)
+    return diff
+
+
 def process_image(original, settings, reference_image=None):
     """Xử lý ảnh và tính các chỉ số đánh giá chất lượng (MSE, PSNR, SSIM, Edge F1)."""
+    t0 = time.perf_counter()
     noise_name = settings.get("noise", "Không thêm nhiễu")
     synthetic_noise = noise_name != "Không thêm nhiễu"
 
@@ -78,6 +116,18 @@ def process_image(original, settings, reference_image=None):
         "reason": "",
     }
 
+    # Tính các biến thể Ảnh sai khác (Difference Image)
+    # 1. Sai khác giữa kết quả và ảnh đầu vào đã biến đổi tông (phản ánh lượng nhiễu bị khử):
+    diff_denoise_raw = np.abs(enhanced.astype(np.int16) - transformed.astype(np.int16)).astype(np.uint8)
+    # 2. Sai khác giữa kết quả và ảnh gốc ban đầu:
+    diff_orig_raw = np.abs(enhanced.astype(np.int16) - original.astype(np.int16)).astype(np.uint8)
+    # 3. Sai khác giữa kết quả và ảnh tham chiếu sạch (residual error):
+    diff_ref_raw = np.abs(enhanced.astype(np.int16) - transformed_reference.astype(np.int16)).astype(np.uint8)
+
+    # Ảnh sai khác mặc định hiển thị: ưu tiên khử nhiễu nếu có lọc, hoặc sai khác so với gốc
+    target_diff = diff_denoise_raw if (filter_name != "Không lọc" or synthetic_noise) else diff_orig_raw
+    diff_display = np.clip(target_diff.astype(np.int16) * 3, 0, 255).astype(np.uint8)
+
     # Sobel panels dùng cùng biến đổi tông sáng; chỉ khác trạng thái lọc.
     edge_base = transformed
     mean_for_edges = mean_filter(edge_base, kernel)
@@ -93,8 +143,18 @@ def process_image(original, settings, reference_image=None):
         "Sau Mean": sobel_display(edge_mean, absolute=False),
         "Sau Median": sobel_display(edge_median, absolute=False),
     }
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
     return {
-        "noisy": noisy, "enhanced": enhanced, "display": display,
+        "noisy": noisy, "transformed": transformed, "enhanced": enhanced, "display": display,
+        "difference": diff_display,
+        "diff_raw": target_diff,
+        "diff_denoise_raw": diff_denoise_raw,
+        "diff_orig_raw": diff_orig_raw,
+        "diff_ref_raw": diff_ref_raw,
+        "elapsed_ms": elapsed_ms,
         "gx": gx, "gy": gy, "magnitude": magnitude,
         "quality": quality, "edge_panels": edge_panels,
     }
+

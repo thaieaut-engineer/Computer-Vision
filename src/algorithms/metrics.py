@@ -28,14 +28,11 @@ def _gray_float(image):
         raise ValueError("Ảnh phải là ảnh xám hoặc ảnh màu 1/3 kênh.")
     if a.shape[2] == 1:
         return a[:, :, 0].astype(np.float64)
-    # Ảnh màu được hiểu theo thứ tự BGR của OpenCV.
-    height, width = a.shape[:2]
-    gray = np.empty((height, width), dtype=np.float64)
-    for y in range(height):
-        for x in range(width):
-            b, g, r = float(a[y, x, 0]), float(a[y, x, 1]), float(a[y, x, 2])
-            gray[y, x] = 0.114 * b + 0.587 * g + 0.299 * r
-    return gray
+    # Ảnh màu được tính theo thứ tự BGR với công thức trọng số luminance
+    b = a[:, :, 0].astype(np.float64)
+    g = a[:, :, 1].astype(np.float64)
+    r = a[:, :, 2].astype(np.float64)
+    return 0.114 * b + 0.587 * g + 0.299 * r
 
 
 def _integral_image(image):
@@ -111,19 +108,14 @@ def edge_metrics(reference, test, threshold_ratio=0.15):
     if ref_mag.shape != test_mag.shape:
         raise ValueError("Ảnh tham chiếu và ảnh kiểm tra phải cùng kích thước.")
     common_threshold = threshold_ratio * float(np.max(ref_mag))
-    height, width = ref_mag.shape
-    tp = fp = fn = 0
-
-    for y in range(height):
-        for x in range(width):
-            ref_edge = ref_mag[y, x] >= common_threshold and common_threshold > 0
-            test_edge = test_mag[y, x] >= common_threshold and common_threshold > 0
-            if ref_edge and test_edge:
-                tp += 1
-            elif test_edge and not ref_edge:
-                fp += 1
-            elif ref_edge and not test_edge:
-                fn += 1
+    if common_threshold > 0:
+        ref_edge = ref_mag >= common_threshold
+        test_edge = test_mag >= common_threshold
+        tp = int(np.count_nonzero(ref_edge & test_edge))
+        fp = int(np.count_nonzero(~ref_edge & test_edge))
+        fn = int(np.count_nonzero(ref_edge & ~test_edge))
+    else:
+        tp = fp = fn = 0
 
     precision = tp / (tp + fp) if tp + fp else 1.0
     recall = tp / (tp + fn) if tp + fn else 1.0

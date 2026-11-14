@@ -3,11 +3,14 @@ import math
 import numpy as np
 import cv2
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QSize
-from PyQt6.QtGui import QImage, QPixmap, QAction, QKeySequence, QDesktopServices
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QSize, QRectF, QPointF
+from PyQt6.QtGui import (
+    QImage, QPixmap, QAction, QKeySequence, QDesktopServices,
+    QPainter, QColor, QFont, QPen, QCursor
+)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QFileDialog, QMessageBox,
-    QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QComboBox,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QComboBox, QCheckBox,
     QSpinBox, QDoubleSpinBox, QFormLayout, QSplitter, QStatusBar,
     QProgressBar, QTabWidget, QScrollArea, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QFrame, QSizePolicy
@@ -16,7 +19,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
 from src.core.image_io import read_image, write_image
-from src.core.pipeline import process_image
+from src.core.pipeline import process_image, compute_difference_map
 from src.core.experiment import run_experiment
 
 
@@ -56,16 +59,31 @@ class ExperimentWorker(QThread):
             self.failed.emit(str(exc))
 
 
-class ImageView(QLabel):
-    def __init__(self, empty_text="Chưa có ảnh"):
-        super().__init__(empty_text)
+class ImageView(QWidget):
+    """Khung hiển thị ảnh tương tác chuyên sâu: hỗ trợ Phóng to (Zoom) và Di chuyển (Pan).
+    
+    - Cuộn chuột: Phóng to / Thu nhỏ theo vị trí con trỏ chuột (1.0x - 10.0x).
+    - Giữ chuột trái và kéo: Di chuyển khung nhìn (Pan).
+    - Nhấp đúp chuột: Đặt lại tỷ lệ gốc 1.0x vừa khung hình.
+    - Phát tín hiệu zoom_changed để đồng bộ chuyển động giữa nhiều ảnh (Sync Zoom).
+    """
+    zoom_changed = pyqtSignal(float, float, float)  # (zoom_factor, center_x, center_y)
+
+    def __init__(self, empty_text="Chưa có ảnh", parent=None):
+        super().__init__(parent)
         self.empty_text = empty_text
-        self._pixmap = None
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image = None
+        self._qimage = None
+        self.zoom_factor = 1.0
+        self.center_x = 0.5
+        self.center_y = 0.5
+        self._dragging = False
+        self._drag_start = None
+        self._block_sync = False
+        self.setMouseTracking(True)
         self.setMinimumSize(40, 30)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setStyleSheet("background:#0c0d16;color:#6f7292;border:1px solid #202236;border-radius:8px;padding:3px;")
-        self.setWordWrap(True)
+        self.setStyleSheet("background:#0c0d16; border:1px solid #202236; border-radius:8px;")
 
     def sizeHint(self):
         return QSize(220, 150)
@@ -74,10 +92,10 @@ class ImageView(QLabel):
         return QSize(40, 30)
 
     def set_image(self, image):
+        self._image = image
         if image is None:
-            self._pixmap = None
-            self.setPixmap(QPixmap())
-            self.setText(self.empty_text)
+            self._qimage = None
+            self.update()
             return
         arr = np.asarray(image)
         if arr.ndim == 2:
@@ -86,22 +104,276 @@ class ImageView(QLabel):
             rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
         rgb = np.ascontiguousarray(rgb)
         h, w = rgb.shape[:2]
-        qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888).copy()
-        self._pixmap = QPixmap.fromImage(qimg)
-        self._render_pixmap()
+        self._qimage = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888).copy()
+        self.update()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._render_pixmap()
+    def reset_zoom(self):
+        self.zoom_factor = 1.0
+        self.center_x = 0.5
+        self.center_y = 0.5
+        self.update()
 
-    def _render_pixmap(self):
-        if self._pixmap is not None and self.width() > 2 and self.height() > 2:
-            scaled = self._pixmap.scaled(
-                self.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self.setPixmap(scaled)
-            self.setText("")
+    def set_view_transform(self, zoom, cx, cy):
+        if self._block_sync:
+            return
+        self._block_sync = True
+        try:
+            self.zoom_factor = max(1.0, min(10.0, zoom))
+            self.center_x = max(0.0, min(1.0, cx))
+            self.center_y = max(0.0, min(1.0, cy))
+            self.update()
+        finally:
+            self._block_sync = False
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#0c0d16"))
+        if self._qimage is None:
+            painter.setPen(QColor("#6f7292"))
+            font = painter.font()
+            font.setPointSize(9)
+            painter.setFont(font)
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.empty_text)
+            return
+
+        W, H = self.width(), self.height()
+        img_w, img_h = self._qimage.width(), self._qimage.height()
+        scale = min(W / img_w, H / img_h)
+        disp_w = img_w * scale
+        disp_h = img_h * scale
+        offset_x = (W - disp_w) / 2.0
+        offset_y = (H - disp_h) / 2.0
+        target_rect = QRectF(offset_x, offset_y, disp_w, disp_h)
+
+        src_w = img_w / self.zoom_factor
+        src_h = img_h / self.zoom_factor
+        src_cx = self.center_x * img_w
+        src_cy = self.center_y * img_h
+        src_left = max(0.0, min(img_w - src_w, src_cx - src_w / 2.0))
+        src_top = max(0.0, min(img_h - src_h, src_cy - src_h / 2.0))
+        src_rect = QRectF(src_left, src_top, src_w, src_h)
+
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(target_rect, self._qimage, src_rect)
+
+        # Hiển thị huy hiệu mức Zoom ở góc dưới phải khi đang phóng to
+        if self.zoom_factor > 1.01:
+            badge_text = f"{int(round(self.zoom_factor * 100))}%"
+            badge_w, badge_h = 52, 22
+            badge_rect = QRectF(W - badge_w - 6, H - badge_h - 6, badge_w, badge_h)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(18, 19, 32, 220))
+            painter.drawRoundedRect(badge_rect, 5, 5)
+            painter.setPen(QColor("#c084fc"))
+            font = QFont("Segoe UI", 8, QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+
+    def wheelEvent(self, event):
+        if self._qimage is None:
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        factor = 1.2 if delta > 0 else (1.0 / 1.2)
+
+        W, H = self.width(), self.height()
+        img_w, img_h = self._qimage.width(), self._qimage.height()
+        scale = min(W / img_w, H / img_h)
+        disp_w = img_w * scale
+        disp_h = img_h * scale
+        offset_x = (W - disp_w) / 2.0
+        offset_y = (H - disp_h) / 2.0
+
+        pos = event.position()
+        mx, my = pos.x(), pos.y()
+        norm_mx = (mx - offset_x) / disp_w if disp_w > 0 else 0.5
+        norm_my = (my - offset_y) / disp_h if disp_h > 0 else 0.5
+        norm_mx = max(0.0, min(1.0, norm_mx))
+        norm_my = max(0.0, min(1.0, norm_my))
+
+        src_w = img_w / self.zoom_factor
+        src_h = img_h / self.zoom_factor
+        src_left = max(0.0, min(img_w - src_w, self.center_x * img_w - src_w / 2.0))
+        src_top = max(0.0, min(img_h - src_h, self.center_y * img_h - src_h / 2.0))
+        img_pt_x = src_left + norm_mx * src_w
+        img_pt_y = src_top + norm_my * src_h
+
+        new_zoom = max(1.0, min(10.0, self.zoom_factor * factor))
+        if abs(new_zoom - 1.0) < 0.05:
+            new_zoom = 1.0
+            new_cx, new_cy = 0.5, 0.5
+        else:
+            new_src_w = img_w / new_zoom
+            new_src_h = img_h / new_zoom
+            src_cx_new = img_pt_x + (0.5 - norm_mx) * new_src_w
+            src_cy_new = img_pt_y + (0.5 - norm_my) * new_src_h
+            new_cx = max(0.0, min(1.0, src_cx_new / img_w))
+            new_cy = max(0.0, min(1.0, src_cy_new / img_h))
+
+        self.zoom_factor = new_zoom
+        self.center_x = new_cx
+        self.center_y = new_cy
+        self.update()
+        if not self._block_sync:
+            self.zoom_changed.emit(self.zoom_factor, self.center_x, self.center_y)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.zoom_factor > 1.0:
+            self._dragging = True
+            self._drag_start = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and self._drag_start is not None and self._qimage is not None:
+            delta = event.position() - self._drag_start
+            self._drag_start = event.position()
+            img_w, img_h = self._qimage.width(), self._qimage.height()
+            scale = min(self.width() / img_w, self.height() / img_h)
+            dx_img = - delta.x() / (scale * self.zoom_factor) if scale > 0 else 0
+            dy_img = - delta.y() / (scale * self.zoom_factor) if scale > 0 else 0
+            self.center_x = max(0.0, min(1.0, self.center_x + dx_img / img_w))
+            self.center_y = max(0.0, min(1.0, self.center_y + dy_img / img_h))
+            self.update()
+            if not self._block_sync:
+                self.zoom_changed.emit(self.zoom_factor, self.center_x, self.center_y)
+        elif self.zoom_factor > 1.01:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor if self.zoom_factor > 1.01 else Qt.CursorShape.ArrowCursor)
+
+    def mouseDoubleClickEvent(self, event):
+        self.reset_zoom()
+        if not self._block_sync:
+            self.zoom_changed.emit(1.0, 0.5, 0.5)
+
+
+class MetricCard(QFrame):
+    """Thẻ hiển thị chỉ số thực nghiệm nổi bật (Obsidian / Neon Accent)."""
+    def __init__(self, title, initial_val="–", val_color="#c084fc", subtitle="", parent=None):
+        super().__init__(parent)
+        self.setObjectName("metricCard")
+        self.setStyleSheet(f"""
+            QFrame#metricCard {{
+                background: #111220;
+                border: 1px solid #23253c;
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QFrame#metricCard:hover {{
+                border-color: #7c3aed;
+                background: #151627;
+            }}
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(2)
+
+        self.lbl_title = QLabel(title)
+        self.lbl_title.setStyleSheet("color: #8b8da8; font-size: 7.5pt; font-weight: 700; letter-spacing: 0.5px;")
+
+        self.lbl_val = QLabel(initial_val)
+        self.lbl_val.setStyleSheet(f"color: {val_color}; font-size: 13pt; font-weight: 800; font-family: 'Segoe UI', system-ui, sans-serif;")
+
+        self.lbl_sub = QLabel(subtitle)
+        self.lbl_sub.setStyleSheet("color: #636683; font-size: 7.5pt;")
+        self.lbl_sub.setWordWrap(True)
+
+        layout.addWidget(self.lbl_title)
+        layout.addWidget(self.lbl_val)
+        layout.addWidget(self.lbl_sub)
+
+    def set_value(self, val_text, sub_text=None):
+        self.lbl_val.setText(val_text)
+        if sub_text is not None:
+            self.lbl_sub.setText(sub_text)
+
+
+class ImageCard(QFrame):
+    """Card hiển thị ảnh theo chuẩn UI hiện đại: Khung ảnh bo góc, tiêu đề bước và huy hiệu (Pill Badge)."""
+    def __init__(self, step_title="1. Ảnh gốc", badge_text="Sạch", badge_color="green", empty_text="Chưa có ảnh", parent=None):
+        super().__init__(parent)
+        self.setObjectName("imageCard")
+        self.setStyleSheet("""
+            QFrame#imageCard {
+                background: #10111d;
+                border: 1px solid #202236;
+                border-radius: 12px;
+                padding: 6px;
+            }
+            QFrame#imageCard:hover {
+                border-color: #3b3e66;
+            }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 8)
+        layout.setSpacing(6)
+
+        # Khung ảnh tương tác (Zoom & Pan)
+        self.view = ImageView(empty_text)
+        layout.addWidget(self.view, 1)
+
+        # Hàng thông tin dưới ảnh: Tiêu đề + Huy hiệu (Pill Badge)
+        self.info_layout = QHBoxLayout()
+        self.info_layout.setContentsMargins(2, 2, 2, 2)
+        self.info_layout.setSpacing(8)
+
+        self.lbl_title = QLabel(step_title)
+        self.lbl_title.setStyleSheet("color: #f1f3fa; font-size: 10pt; font-weight: 700;")
+        self.info_layout.addWidget(self.lbl_title)
+
+        self.info_layout.addStretch()
+
+        self.lbl_badge = QLabel(badge_text)
+        self.set_badge(badge_text, badge_color)
+        self.info_layout.addWidget(self.lbl_badge)
+
+        layout.addLayout(self.info_layout)
+
+    def set_title(self, title):
+        self.lbl_title.setText(title)
+
+    def set_badge(self, text, color="green"):
+        self.lbl_badge.setText(text)
+        if color == "green":
+            bg = "rgba(16, 185, 129, 0.16)"
+            border = "rgba(16, 185, 129, 0.35)"
+            fg = "#34d399"
+        elif color in ("orange", "peach"):
+            bg = "rgba(249, 115, 22, 0.16)"
+            border = "rgba(249, 115, 22, 0.35)"
+            fg = "#fb923c"
+        elif color == "purple":
+            bg = "rgba(139, 92, 246, 0.18)"
+            border = "rgba(139, 92, 246, 0.38)"
+            fg = "#c084fc"
+        elif color == "cyan":
+            bg = "rgba(56, 189, 248, 0.16)"
+            border = "rgba(56, 189, 248, 0.35)"
+            fg = "#38bdf8"
+        else:
+            bg = "rgba(100, 116, 139, 0.16)"
+            border = "rgba(100, 116, 139, 0.3)"
+            fg = "#94a3b8"
+
+        self.lbl_badge.setStyleSheet(f"""
+            QLabel {{
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 9px;
+                color: {fg};
+                font-size: 8pt;
+                font-weight: 600;
+                padding: 2px 8px;
+            }}
+        """)
+
+
 
 
 class HistogramCanvas(FigureCanvasQTAgg):
@@ -151,12 +423,35 @@ class MainWindow(QMainWindow):
         self.noisy_image = None
         self.result_image = None
         self.display_image = None
+        self.last_result = None
+        self.showing_diff = False
+        self.result_title_text = "3. Sau Median"
+        self.result_badge_text = "Đã lọc"
+        self.result_badge_color = "green"
         self.processing_worker = None
         self.experiment_worker = None
         self.last_experiment = None
         self._build_ui()
         self._build_menu()
         self._apply_style()
+        self._init_zoom_sync()
+
+    def _init_zoom_sync(self):
+        self.preview_views = [self.original_view, self.noisy_view, self.result_view]
+        for v in self.preview_views:
+            v.zoom_changed.connect(self._on_view_zoom_changed)
+
+    def _on_view_zoom_changed(self, zoom, cx, cy):
+        if not self.sync_zoom_cb.isChecked():
+            return
+        sender = self.sender()
+        for v in self.preview_views:
+            if v is not sender:
+                v.set_view_transform(zoom, cx, cy)
+
+    def reset_all_zoom(self):
+        for v in self.preview_views:
+            v.reset_zoom()
 
     def _init_window_geometry(self):
         screen = QApplication.primaryScreen()
@@ -227,27 +522,87 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
 
-        # Trái: Ảnh gốc + kết quả (trên) và So sánh Sobel (dưới), ngăn cách bởi vertical splitter
+        # Trái: 3 ảnh xem trước (trên) và So sánh Sobel (dưới), ngăn cách bởi vertical splitter
         left_splitter = QSplitter(Qt.Orientation.Vertical)
         left_splitter.setChildrenCollapsible(False)
 
+        # Container chứa tiêu đề nhóm 'KẾT QUẢ XỬ LÝ ẢNH' và 3 card ảnh
+        preview_container = QWidget()
+        preview_container_layout = QVBoxLayout(preview_container)
+        preview_container_layout.setContentsMargins(0, 0, 0, 0)
+        preview_container_layout.setSpacing(6)
+
+        # Hàng tiêu đề trên cùng: 'KẾT QUẢ XỬ LÝ ẢNH' (trái) + Thanh công cụ Zoom (phải)
+        top_header_layout = QHBoxLayout()
+        top_header_layout.setContentsMargins(4, 2, 4, 2)
+        top_header_layout.setSpacing(10)
+
+        section_title = QLabel("KẾT QUẢ XỬ LÝ ẢNH")
+        section_title.setStyleSheet("color: #f1f3fa; font-size: 11pt; font-weight: 800; letter-spacing: 0.5px;")
+        top_header_layout.addWidget(section_title)
+
+        top_header_layout.addStretch()
+
+        self.sync_zoom_cb = QCheckBox("🔗 Đồng bộ Zoom")
+        self.sync_zoom_cb.setChecked(True)
+        self.sync_zoom_cb.setToolTip("Đồng bộ vị trí và tỷ lệ thu phóng giữa 3 ảnh.")
+
+        self.reset_zoom_btn = QPushButton("↺ 100%")
+        self.reset_zoom_btn.setStyleSheet("""
+            QPushButton {
+                background: #171828; color: #a5a8c9; border: 1px solid #282a42;
+                border-radius: 5px; padding: 2px 10px; font-size: 8pt;
+            }
+            QPushButton:hover { background: #22243a; color: #e2e4f0; border-color: #7c3aed; }
+        """)
+        self.reset_zoom_btn.clicked.connect(self.reset_all_zoom)
+
+        zoom_hint = QLabel("💡 Cuộn: Zoom • Kéo: Pan • Đúp: Reset")
+        zoom_hint.setStyleSheet("color: #5d607e; font-size: 8pt;")
+
+        top_header_layout.addWidget(self.sync_zoom_cb)
+        top_header_layout.addWidget(self.reset_zoom_btn)
+        top_header_layout.addWidget(zoom_hint)
+        preview_container_layout.addLayout(top_header_layout)
+
+        # Khu vực 3 ảnh song song với thẻ bo góc và huy hiệu trạng thái
         preview_split = QSplitter(Qt.Orientation.Horizontal)
         preview_split.setChildrenCollapsible(False)
-        original_group = QGroupBox("ẢNH ĐẦU VÀO")
-        original_layout = QVBoxLayout(original_group)
-        original_layout.setContentsMargins(6, 6, 6, 6)
-        self.original_view = ImageView("Mở ảnh để bắt đầu")
-        original_layout.addWidget(self.original_view)
-        result_group = QGroupBox("ẢNH KẾT QUẢ")
-        result_layout = QVBoxLayout(result_group)
-        result_layout.setContentsMargins(6, 6, 6, 6)
-        self.result_view = ImageView("Kết quả xử lý sẽ hiển thị tại đây")
-        result_layout.addWidget(self.result_view)
-        preview_split.addWidget(original_group)
-        preview_split.addWidget(result_group)
+
+        # 1. Ảnh gốc [Sạch]
+        self.card_clean = ImageCard("1. Ảnh gốc", "Sạch", "green", "Mở ảnh để bắt đầu")
+        self.original_view = self.card_clean.view
+
+        # 2. Ảnh nhiễu [Salt & Pepper / Gaussian / Không nhiễu]
+        self.card_noisy = ImageCard("2. Ảnh nhiễu", "Không nhiễu", "gray", "Ảnh nhiễu sẽ hiển thị tại đây")
+        self.noisy_view = self.card_noisy.view
+
+        # 3. Sau Median [Đã lọc]
+        self.card_result = ImageCard("3. Sau Median", "Đã lọc", "green", "Kết quả xử lý sẽ hiển thị tại đây")
+        self.result_view = self.card_result.view
+
+        # Nút chuyển đổi nhanh xem Ảnh sai khác trên Card 3
+        self.diff_toggle_btn = QPushButton("◩ Sai khác")
+        self.diff_toggle_btn.setToolTip("Chuyển đổi giữa Ảnh kết quả lọc và Ảnh sai khác (Difference Image)")
+        self.diff_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: #171828; color: #a5a8c9; border: 1px solid #2b2d45;
+                border-radius: 9px; padding: 2px 8px; font-size: 7.5pt; font-weight: 600;
+            }
+            QPushButton:hover { background: #22243c; color: #c084fc; border-color: #7c3aed; }
+        """)
+        self.diff_toggle_btn.clicked.connect(self.toggle_result_diff)
+        self.card_result.info_layout.insertWidget(2, self.diff_toggle_btn)
+
+        preview_split.addWidget(self.card_clean)
+        preview_split.addWidget(self.card_noisy)
+        preview_split.addWidget(self.card_result)
         preview_split.setStretchFactor(0, 1)
         preview_split.setStretchFactor(1, 1)
-        left_splitter.addWidget(preview_split)
+        preview_split.setStretchFactor(2, 1)
+
+        preview_container_layout.addWidget(preview_split, 1)
+        left_splitter.addWidget(preview_container)
 
         edge_group = QGroupBox("SO SÁNH ĐƯỜNG BIÊN SOBEL – TÁC ĐỘNG RIÊNG CỦA BỘ LỌC")
         edge_layout = QGridLayout(edge_group)
@@ -349,18 +704,38 @@ class MainWindow(QMainWindow):
         self.process_progress.setRange(0, 0)
         self.process_progress.hide()
         control_layout.addWidget(self.process_progress)
+
+        # 5. Thông số thực nghiệm nổi bật (Metric Cards)
         metrics_group = QGroupBox("5. CHỈ SỐ CHẤT LƯỢNG")
         metrics_layout = QVBoxLayout(metrics_group)
-        metrics_layout.setContentsMargins(8, 8, 8, 8)
-        metrics_layout.setSpacing(4)
-        self.metrics_label = QLabel("MSE: –   |   PSNR: –\nSSIM: –   |   Edge F1: –")
-        self.metrics_label.setObjectName("metricsLabel")
-        self.metrics_label.setWordWrap(True)
-        metrics_layout.addWidget(self.metrics_label)
-        self.edge_metric_label = QLabel("Biên: Precision: –   |   Recall: –")
-        self.edge_metric_label.setObjectName("edgeMetricLabel")
-        self.edge_metric_label.setWordWrap(True)
-        metrics_layout.addWidget(self.edge_metric_label)
+        metrics_layout.setContentsMargins(6, 6, 6, 6)
+        metrics_layout.setSpacing(6)
+
+        cards_grid = QGridLayout()
+        cards_grid.setContentsMargins(0, 0, 0, 0)
+        cards_grid.setSpacing(6)
+
+        self.card_psnr = MetricCard("PSNR (ĐỘ SẮC NÉT)", "–", "#38bdf8", "Tín hiệu / nhiễu (dB)")
+        self.card_ssim = MetricCard("SSIM CỤC BỘ", "–", "#c084fc", "Tương đồng cấu trúc [0–1]")
+        self.card_mse = MetricCard("MSE TOÀN PHƯƠNG", "–", "#fb7185", "Sai số trung bình")
+        self.card_edge = MetricCard("EDGE F1 (SOBEL)", "–", "#a78bfa", "Bảo toàn biên [0–1]")
+
+        cards_grid.addWidget(self.card_psnr, 0, 0)
+        cards_grid.addWidget(self.card_ssim, 0, 1)
+        cards_grid.addWidget(self.card_mse, 1, 0)
+        cards_grid.addWidget(self.card_edge, 1, 1)
+        metrics_layout.addLayout(cards_grid)
+
+        details_box = QVBoxLayout()
+        details_box.setSpacing(2)
+        self.edge_metric_label = QLabel("Biên Sobel: Precision: –   |   Recall: –")
+        self.edge_metric_label.setStyleSheet("color: #9498b8; font-size: 8pt; font-weight: 600;")
+        self.time_label = QLabel("⚡ Thời gian xử lý: –")
+        self.time_label.setStyleSheet("color: #34d399; font-size: 8.5pt; font-weight: 700;")
+        details_box.addWidget(self.edge_metric_label)
+        details_box.addWidget(self.time_label)
+        metrics_layout.addLayout(details_box)
+
         metric_note = QLabel("Chỉ số chất lượng được tính so với ảnh gốc (cùng Gamma/Contrast).")
         metric_note.setObjectName("hint")
         metric_note.setWordWrap(True)
@@ -404,6 +779,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.experiment_progress)
         self.experiment_status = QLabel("Chưa chạy thực nghiệm.")
         layout.addWidget(self.experiment_status)
+
+        # Thẻ tóm tắt thông số tối ưu nổi bật
+        exp_summary_layout = QHBoxLayout()
+        exp_summary_layout.setSpacing(6)
+        self.exp_card_psnr = MetricCard("CẤU HÌNH PSNR TỐT NHẤT", "–", "#38bdf8", "Chưa chạy")
+        self.exp_card_ssim = MetricCard("CẤU HÌNH SSIM TỐT NHẤT", "–", "#c084fc", "Chưa chạy")
+        self.exp_card_edge = MetricCard("BẢO TOÀN BIÊN TỐT NHẤT (F1)", "–", "#a78bfa", "Chưa chạy")
+        self.exp_card_speed = MetricCard("HIỆU NĂNG THỰC NGHIỆM", "–", "#34d399", "Tối ưu hóa học thuật")
+        exp_summary_layout.addWidget(self.exp_card_psnr)
+        exp_summary_layout.addWidget(self.exp_card_ssim)
+        exp_summary_layout.addWidget(self.exp_card_edge)
+        exp_summary_layout.addWidget(self.exp_card_speed)
+        layout.addLayout(exp_summary_layout)
+
         self.experiment_table = QTableWidget(0, 9)
         self.experiment_table.setHorizontalHeaderLabels([
             "Nhiễu", "Mức", "Gamma", "Bộ lọc", "Kernel", "MSE", "PSNR (dB)", "SSIM", "Edge F1"
@@ -729,13 +1118,32 @@ class MainWindow(QMainWindow):
         self.noisy_image = None
         self.result_image = None
         self.display_image = None
+        self.last_result = None
+        self.showing_diff = False
+        self.diff_toggle_btn.setText("◩ Sai khác")
+
         self.original_view.set_image(image)
+        self.card_clean.set_title("1. Ảnh gốc")
+        self.card_clean.set_badge("Sạch", "green")
+
+        self.noisy_view.set_image(None)
+        self.card_noisy.set_title("2. Ảnh nhiễu")
+        self.card_noisy.set_badge("Không nhiễu", "gray")
+
         self.result_view.set_image(None)
+        self.card_result.set_title("3. Sau Median")
+        self.card_result.set_badge("Chờ xử lý", "gray")
+
+        self.reset_all_zoom()
         for view in self.edge_views.values():
             view.set_image(None)
         self.save_btn.setEnabled(False)
-        self.metrics_label.setText("MSE: –   |   PSNR: –\nSSIM: –   |   Edge F1: –")
-        self.edge_metric_label.setText("Biên: Precision: –   |   Recall: –")
+        self.card_psnr.set_value("–", "Tín hiệu / nhiễu (dB)")
+        self.card_ssim.set_value("–", "Tương đồng cấu trúc [0–1]")
+        self.card_mse.set_value("–", "Sai số trung bình")
+        self.card_edge.set_value("–", "Bảo toàn biên [0–1]")
+        self.edge_metric_label.setText("Biên Sobel: Precision: –   |   Recall: –")
+        self.time_label.setText("⚡ Thời gian xử lý: –")
         self.histogram_canvas.plot_images(image, None)
         self.statusBar().showMessage(f"Đã mở {Path(path).name} | {image.shape[1]} × {image.shape[0]} pixels")
         self.tabs.setCurrentIndex(0)
@@ -749,14 +1157,52 @@ class MainWindow(QMainWindow):
         self.filter_combo.setCurrentIndex(0)
         self.kernel_combo.setCurrentIndex(0)
         self.sobel_combo.setCurrentIndex(0)
+        self.showing_diff = False
+        self.diff_toggle_btn.setText("◩ Sai khác")
         if self.original_image is not None:
             self.result_image = None
             self.display_image = None
+            self.last_result = None
+            self.original_view.set_image(self.original_image)
+            self.card_clean.set_title("1. Ảnh gốc")
+            self.card_clean.set_badge("Sạch", "green")
+
+            self.noisy_view.set_image(None)
+            self.card_noisy.set_title("2. Ảnh nhiễu")
+            self.card_noisy.set_badge("Không nhiễu", "gray")
+
             self.result_view.set_image(None)
+            self.card_result.set_title("3. Sau Median")
+            self.card_result.set_badge("Chờ xử lý", "gray")
+
+            self.reset_all_zoom()
+            for view in self.edge_views.values():
+                view.set_image(None)
             self.save_btn.setEnabled(False)
-            self.metrics_label.setText("MSE: –   |   PSNR: –\nSSIM: –   |   Edge F1: –")
-            self.edge_metric_label.setText("Biên: Precision: –   |   Recall: –")
+            self.card_psnr.set_value("–", "Tín hiệu / nhiễu (dB)")
+            self.card_ssim.set_value("–", "Tương đồng cấu trúc [0–1]")
+            self.card_mse.set_value("–", "Sai số trung bình")
+            self.card_edge.set_value("–", "Bảo toàn biên [0–1]")
+            self.edge_metric_label.setText("Biên Sobel: Precision: –   |   Recall: –")
+            self.time_label.setText("⚡ Thời gian xử lý: –")
             self.histogram_canvas.plot_images(self.original_image, None)
+
+    def toggle_result_diff(self):
+        if not hasattr(self, "last_result") or self.last_result is None:
+            return
+        self.showing_diff = not self.showing_diff
+        if self.showing_diff:
+            diff_img = self.last_result.get("difference")
+            if diff_img is not None:
+                self.result_view.set_image(diff_img)
+            self.card_result.set_title("3. Ảnh sai khác")
+            self.card_result.set_badge("Sai khác 3×", "orange")
+            self.diff_toggle_btn.setText("✦ Kết quả")
+        else:
+            self.result_view.set_image(self.display_image)
+            self.card_result.set_title(getattr(self, "result_title_text", "3. Sau Median"))
+            self.card_result.set_badge(getattr(self, "result_badge_text", "Đã lọc"), getattr(self, "result_badge_color", "green"))
+            self.diff_toggle_btn.setText("◩ Sai khác")
 
     def apply_processing(self):
         if self.original_image is None:
@@ -785,30 +1231,89 @@ class MainWindow(QMainWindow):
         self.processing_worker.start()
 
     def on_processing_completed(self, result):
+        self.last_result = result
         self.noisy_image = result["noisy"]
         self.result_image = result["enhanced"]
         self.display_image = result["display"]
+        self.showing_diff = False
+        self.diff_toggle_btn.setText("◩ Sai khác")
+
+        # 1. Ảnh gốc [Sạch]
+        self.original_view.set_image(self.original_image)
+        self.card_clean.set_title("1. Ảnh gốc")
+        self.card_clean.set_badge("Sạch", "green")
+
+        # 2. Ảnh nhiễu
+        noise_name = self.noise_combo.currentText()
+        if noise_name != "Không thêm nhiễu":
+            self.noisy_view.set_image(result["transformed"])
+            self.card_noisy.set_title("2. Ảnh nhiễu")
+            self.card_noisy.set_badge(noise_name, "orange")
+        else:
+            has_transform = (self.gamma_spin.value() != 1.0 or self.contrast_spin.value() != 1.0 or self.brightness_spin.value() != 0)
+            if has_transform:
+                self.noisy_view.set_image(result["transformed"])
+                self.card_noisy.set_title("2. Biến đổi tông")
+                self.card_noisy.set_badge("Đã chỉnh tông", "cyan")
+            else:
+                self.noisy_view.set_image(self.original_image)
+                self.card_noisy.set_title("2. Ảnh nhiễu")
+                self.card_noisy.set_badge("Không nhiễu", "gray")
+
+        # 3. Kết quả xử lý (Sau Median / Sau Mean / Sobel)
+        filter_name = self.filter_combo.currentText()
+        if filter_name in ("Mean", "Median"):
+            self.result_title_text = f"3. Sau {filter_name}"
+            self.result_badge_text = "Đã lọc"
+            self.result_badge_color = "green"
+        elif self.sobel_combo.currentText() != "Không dùng":
+            sobel_name = self.sobel_combo.currentText()
+            self.result_title_text = f"3. {sobel_name}"
+            self.result_badge_text = "Biên Sobel"
+            self.result_badge_color = "purple"
+        else:
+            self.result_title_text = "3. Ảnh kết quả"
+            self.result_badge_text = "Đã xử lý"
+            self.result_badge_color = "green"
+
+        self.card_result.set_title(self.result_title_text)
+        self.card_result.set_badge(self.result_badge_text, self.result_badge_color)
         self.result_view.set_image(self.display_image)
+
         q = result["quality"]
         if q.get("valid", False):
-            psnr_text = "∞" if math.isinf(q["psnr"]) else f"{q['psnr']:.3f} dB"
-            self.metrics_label.setText(
-                f"MSE: {q['mse']:.3f}   |   PSNR: {psnr_text}\n"
-                f"SSIM cục bộ: {q['ssim']:.5f}   |   Edge F1: {q['edge']['f1']:.4f}"
-            )
+            psnr_val = q["psnr"]
+            psnr_text = "∞" if math.isinf(psnr_val) else f"{psnr_val:.2f} dB"
+            psnr_eval = "Rất tốt (>30dB)" if psnr_val >= 30 else ("Khá (20–30dB)" if psnr_val >= 20 else "Nhiều biến dạng (<20dB)")
+            self.card_psnr.set_value(psnr_text, psnr_eval)
+
+            ssim_val = q["ssim"]
+            ssim_eval = "Bảo toàn cấu trúc rất cao" if ssim_val >= 0.85 else ("Cấu trúc khá tốt" if ssim_val >= 0.65 else "Biến đổi cấu trúc lớn")
+            self.card_ssim.set_value(f"{ssim_val:.4f}", ssim_eval)
+
+            self.card_mse.set_value(f"{q['mse']:.2f}", "Sai số toàn phương")
+
             e = q["edge"]
+            self.card_edge.set_value(f"{e['f1']:.4f}", f"P: {e['precision']:.3f} | R: {e['recall']:.3f}")
             self.edge_metric_label.setText(
-                f"Biên: Precision: {e['precision']:.4f}   |   Recall: {e['recall']:.4f}"
+                f"Biên Sobel: Precision: {e['precision']:.4f}   |   Recall: {e['recall']:.4f}"
             )
         else:
-            self.metrics_label.setText("MSE: N/A   |   PSNR: N/A\nSSIM: N/A   |   Edge F1: N/A")
-            self.edge_metric_label.setText("Biên: Precision: N/A   |   Recall: N/A")
+            self.card_psnr.set_value("N/A")
+            self.card_ssim.set_value("N/A")
+            self.card_mse.set_value("N/A")
+            self.card_edge.set_value("N/A")
+            self.edge_metric_label.setText("Biên Sobel: Precision: N/A   |   Recall: N/A")
             QMessageBox.information(self, "Thông báo", q.get("reason", "Không thể đánh giá định lượng."))
+
+        elapsed = result.get("elapsed_ms", 0.0)
+        self.time_label.setText(f"⚡ Thời gian xử lý: {elapsed:.1f} ms (Tự cài đặt)")
+
         for name, image in result["edge_panels"].items():
             self.edge_views[name].set_image(image)
         self.save_btn.setEnabled(True)
         self.histogram_canvas.plot_images(self.original_image, self.result_image)
-        self.statusBar().showMessage("Xử lý hoàn tất. Chỉ số chất lượng được tính trước bước hiển thị Sobel.")
+        self.statusBar().showMessage(f"Xử lý hoàn tất trong {elapsed:.1f} ms. Đã cập nhật 3 ảnh và so sánh Sobel.")
 
     def on_worker_failed(self, message):
         self._set_busy(False)
@@ -868,10 +1373,36 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.experiment_table.setItem(r, c, item)
+
+        # Cập nhật các thẻ thông số thực nghiệm nổi bật
+        valid_psnr = [r for r in rows if not math.isinf(r["psnr_db"])]
+        if valid_psnr:
+            best_p = max(valid_psnr, key=lambda r: r["psnr_db"])
+            self.exp_card_psnr.set_value(
+                f"{best_p['psnr_db']:.2f} dB",
+                f"{best_p['noise']} {best_p['noise_level']:g} → {best_p['method']} {best_p['kernel']}×{best_p['kernel']} (γ={best_p['gamma']:.1f})"
+            )
+        best_s = max(rows, key=lambda r: r["ssim_local"])
+        self.exp_card_ssim.set_value(
+            f"{best_s['ssim_local']:.4f}",
+            f"{best_s['noise']} {best_s['noise_level']:g} → {best_s['method']} {best_s['kernel']}×{best_s['kernel']} (γ={best_s['gamma']:.1f})"
+        )
+        best_e = max(rows, key=lambda r: r["edge_f1"])
+        self.exp_card_edge.set_value(
+            f"{best_e['edge_f1']:.4f}",
+            f"{best_e['noise']} {best_e['noise_level']:g} → {best_e['method']} {best_e['kernel']}×{best_e['kernel']} (γ={best_e['gamma']:.1f})"
+        )
+        total_time_s = result.get("total_time_s", 0.0)
+        per_case_ms = (total_time_s / len(rows) * 1000.0) if len(rows) > 0 else 0.0
+        self.exp_card_speed.set_value(
+            f"{len(rows)} ca hoàn tất",
+            f"Tổng: {total_time_s:.2f}s (~{per_case_ms:.1f}ms/ca)"
+        )
+
         self.open_results_btn.setEnabled(True)
         self.experiment_progress.setValue(100)
         self.experiment_status.setText(
-            f"Hoàn thành {len(rows)} ca (3 Gamma × 2 nhiễu × 2 mức × 2 bộ lọc × 3 kernel). Kết quả: {result['output_dir']}"
+            f"Hoàn thành {len(rows)} ca (3 Gamma × 2 nhiễu × 2 mức × 2 bộ lọc × 3 kernel) trong {total_time_s:.2f}s. Kết quả: {result['output_dir']}"
         )
         self.statusBar().showMessage("Thực nghiệm hoàn tất.")
 

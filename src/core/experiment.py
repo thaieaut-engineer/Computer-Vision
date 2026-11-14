@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 from pathlib import Path
 import csv
@@ -21,6 +22,7 @@ def run_experiment(clean_image, output_root="results/experiments", progress_call
     ground truth và ảnh nhiễu trước lọc để metric đo riêng sai số do nhiễu/lọc,
     không phạt thay đổi độ sáng có chủ đích của phép Gamma.
     """
+    t0 = time.perf_counter()
     out_dir = Path(output_root) / datetime.now().strftime("run_%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
     cases = []
@@ -106,6 +108,7 @@ def run_experiment(clean_image, output_root="results/experiments", progress_call
     edge_chart = out_dir / "edge_f1_comparison.png"
     fig.savefig(edge_chart, dpi=150); plt.close(fig)
 
+    total_time_s = time.perf_counter() - t0
     return {"output_dir": str(out_dir.resolve()), "csv": str(csv_path.resolve()),
             "psnr_chart": str(psnr_chart.resolve()), "edge_chart": str(edge_chart.resolve()),
-            "rows": cases}
+            "rows": cases, "total_time_s": total_time_s}
