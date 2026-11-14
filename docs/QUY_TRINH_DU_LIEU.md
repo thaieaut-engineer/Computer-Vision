@@ -1,23 +1,14 @@
-# Quy trình sử dụng hai bộ dữ liệu
+# Quy trình thực nghiệm và xử lý dữ liệu
 
-## A. Bộ dữ liệu ảnh sạch (thực nghiệm có kiểm soát)
+## A. Quy trình xử lý ảnh trên giao diện
 
-1. Chọn ảnh sạch làm ảnh đầu vào bằng **Mở ảnh**.
-2. Không cần chọn ảnh tham chiếu riêng; ảnh đang mở sẽ được xem là ground truth.
-3. Chọn Gaussian hoặc Salt & Pepper, đặt mức nhiễu, Gamma 0.8/1.0/1.2, Mean/Median và kernel.
-4. Nhấn **Áp dụng xử lý**. MSE/PSNR/SSIM/Edge F1 được tính so với ảnh sạch đã áp dụng cùng biến đổi Gamma/Contrast/Brightness.
-5. Với tab **Thực nghiệm**, chạy 72 cấu hình. Nếu không chọn ảnh tham chiếu riêng, ứng dụng hỏi xác nhận ảnh đang mở có sạch hay không.
+1. Chọn ảnh đầu vào bằng nút **Mở ảnh** (ảnh đang mở được dùng làm ảnh gốc / ground truth).
+2. Chọn loại nhiễu (Gaussian hoặc Salt & Pepper) hoặc giữ nguyên không thêm nhiễu.
+3. Đặt mức nhiễu, thông số Gamma / Tương phản / Độ sáng, bộ lọc (Mean hoặc Median) và kích thước kernel.
+4. Nhấn **Áp dụng xử lý**. Các chỉ số MSE/PSNR/SSIM/Edge F1 được tự động tính so với ảnh gốc (đã áp dụng cùng biến đổi Gamma/Contrast/Brightness).
+5. Chuyển sang tab **Thực nghiệm** và nhấn **Chạy 72 ca thực nghiệm** để tự động khảo sát toàn diện.
 
-## B. Bộ dữ liệu ảnh thực tế đã nhiễu
-
-1. Chọn ảnh đã nhiễu làm ảnh đầu vào bằng **Mở ảnh**.
-2. Trong nhóm **Ảnh tham chiếu sạch (Ground Truth)**, chọn ảnh sạch của đúng cảnh đó.
-3. Đảm bảo ảnh sạch và ảnh nhiễu đã căn chỉnh cùng vị trí, cùng kích thước, cùng số kênh. Chỉ cùng kích thước nhưng khác cảnh/góc chụp không phải ground truth hợp lệ.
-4. Đặt **Loại nhiễu = Không thêm nhiễu** để không chồng thêm nhiễu nhân tạo.
-5. Chọn Mean/Median và kernel, nhấn **Áp dụng xử lý**. Các chỉ số được tính với ảnh tham chiếu sạch sau cùng biến đổi điểm ảnh.
-6. Nếu không có ảnh sạch tương ứng, không thể báo cáo MSE/PSNR/SSIM/Edge F1 như các chỉ số khôi phục tham chiếu. Ứng dụng sẽ hiển thị N/A. Khi đó chỉ phân tích định tính, histogram và quan sát trực quan.
-
-## C. Ma trận thực nghiệm tự động
+## B. Ma trận thực nghiệm tự động
 
 - Nhiễu: Gaussian sigma 12, 24; Salt & Pepper 3%, 7%.
 - Gamma: 0.8, 1.0, 1.2.
@@ -27,7 +18,7 @@
 - Seed sinh nhiễu cố định 2026 để tái lập.
 - Kết quả: CSV, biểu đồ PSNR và Edge F1, ảnh minh họa.
 
-## D. Diễn giải metric
+## C. Diễn giải metric
 
 - MSE và PSNR tính trên toàn bộ kênh BGR; MAX=255.
 - SSIM cục bộ tính trên ảnh xám, cửa sổ 7×7.

@@ -30,16 +30,14 @@ Dữ liệu chi tiết được xuất tự động trong `experiment_results.cs
 Ảnh tham chiếu phải là ảnh sạch. Nếu ảnh đầu vào vốn có nhiễu, không được gọi nó là ground truth. Với ảnh màu, SSIM cục bộ đang tính trên ảnh xám; cần nêu rõ trong báo cáo. Edge F1 là phép đo bổ sung dựa trên ngưỡng, không thay thế đánh giá trực quan hoặc các phân tích khác.
 
 
-### Bổ sung: tham chiếu sạch và khảo sát Gamma
+### Bổ sung: khảo sát Gamma
 
-Bộ thực nghiệm dùng ground truth sạch độc lập. Mỗi ảnh noisy và ground truth được biến đổi cùng Gamma (0.8, 1.0, 1.2) trước khi áp dụng Mean/Median. Ma trận gồm 72 cấu hình: 2 loại nhiễu × 2 mức nhiễu × 3 Gamma × 2 bộ lọc × 3 kernel. Với ảnh thực tế đã nhiễu, chỉ số định lượng chỉ hợp lệ khi có ảnh tham chiếu sạch cùng cảnh, cùng kích thước và đã đăng ký trong giao diện.
+Mỗi ảnh nhiễu và ảnh gốc được biến đổi cùng Gamma (0.8, 1.0, 1.2) trước khi áp dụng Mean/Median. Ma trận thực nghiệm gồm 72 cấu hình: 2 loại nhiễu × 2 mức nhiễu × 3 Gamma × 2 bộ lọc × 3 kernel.
 
 
-## 7. Hai chế độ dữ liệu
+## 7. Chế độ dữ liệu thực nghiệm
 
-**Dữ liệu A – ảnh sạch:** ảnh sạch là ground truth. Chương trình tự sinh Gaussian hoặc Salt & Pepper theo seed cố định, sau đó lọc. MSE/PSNR/SSIM/Edge F1 được tính giữa ảnh sau lọc và ground truth đã biến đổi cùng Gamma.
-
-**Dữ liệu B – ảnh thực tế đã nhiễu:** mở ảnh nhiễu làm ảnh đầu vào và chọn ảnh sạch tương ứng bằng nút “Chọn ảnh tham chiếu sạch”. Không bật mô phỏng nhiễu thêm. Chương trình kiểm tra kích thước/số kênh; nếu không có ground truth thì các chỉ số tham chiếu hiển thị N/A. Hai ảnh cần cùng cảnh, cùng góc chụp/căn chỉnh và cùng kích thước; chỉ cùng kích thước nhưng khác cảnh không tạo thành ground truth hợp lệ.
+Ảnh đầu vào được dùng làm ground truth. Chương trình tự sinh Gaussian hoặc Salt & Pepper theo seed cố định, sau đó lọc. MSE/PSNR/SSIM/Edge F1 được tính giữa ảnh sau lọc và ground truth đã biến đổi cùng Gamma.
 
 ## 8. Diễn giải chỉ số khi dùng Gamma
 

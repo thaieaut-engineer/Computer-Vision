@@ -18,8 +18,7 @@ Xây dựng ứng dụng desktop cho phép khảo sát tác động của biến
 - So sánh bốn bản đồ biên: ảnh tham chiếu, ảnh nhiễu, sau Mean, sau Median.
 - Đánh giá bằng MSE/PSNR tự triển khai công thức, SSIM cục bộ tự tính thống kê cửa sổ, Edge Precision/Recall/F1.
 - Hiển thị histogram ảnh gốc và ảnh kết quả.
-- Chọn ảnh tham chiếu sạch riêng (ground truth); kiểm tra kích thước trước khi đánh giá.
-- Không tự tính MSE/PSNR/SSIM/Edge F1 nếu ảnh thực tế không có ground truth sạch.
+- Tự động dùng ảnh gốc làm ảnh tham chiếu (ground truth) để đánh giá các chỉ số MSE/PSNR/SSIM/Edge F1.
 - Tự động chạy ma trận 72 ca: 2 loại nhiễu × 2 mức × 2 bộ lọc × 3 kernel × 3 mức Gamma (0.8, 1.0, 1.2), xuất CSV và biểu đồ PSNR/Edge F1.
 - Chạy xử lý trong QThread để giao diện không bị khóa khi đang tính toán.
 
@@ -74,7 +73,7 @@ Không cần cài cả hai cách. Nếu dùng cách A, bỏ qua bước kích ho
 python run_gui.py
 ```
 
-Mở ảnh cần xử lý bằng nút **Mở ảnh**. Nếu ảnh đầu vào vốn đã nhiễu, chọn thêm **Ảnh tham chiếu sạch (Ground Truth)** cùng kích thước trước khi áp dụng. Nếu mô phỏng nhiễu nhân tạo từ ảnh sạch đang mở, ảnh đang mở được dùng làm ground truth. Nút **Lưu ảnh kết quả** lưu ảnh đang hiển thị. Tab **Thực nghiệm** chạy bộ 72 ca trên ảnh sạch tham chiếu đã chọn; nếu chưa chọn, ứng dụng yêu cầu xác nhận ảnh đang mở là ảnh sạch. Tab **Histogram** hiển thị phân bố mức xám.
+Mở ảnh cần xử lý bằng nút **Mở ảnh**. Ảnh đang mở được dùng làm ảnh gốc (ground truth). Nút **Lưu ảnh kết quả** lưu ảnh đang hiển thị. Tab **Thực nghiệm** chạy bộ 72 ca trên ảnh đang mở. Tab **Histogram** hiển thị phân bố mức xám.
 
 Ảnh mẫu để thử ngay: `assets/sample_test.png`.
 

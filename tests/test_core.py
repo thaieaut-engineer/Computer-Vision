@@ -35,13 +35,14 @@ class TestCoreServices(unittest.TestCase):
         self.assertIn("mse", result["quality"])
         self.assertEqual(set(result["edge_panels"].keys()), {"Ảnh tham chiếu", "Ảnh nhiễu", "Sau Mean", "Sau Median"})
 
-    def test_no_reference_disables_metrics_for_real_noisy_input(self):
+    def test_pipeline_without_noise_uses_original_as_reference(self):
         result = process_image(self.image, {
             "noise": "Không thêm nhiễu", "gamma": 1.0, "contrast": 1.0,
             "brightness": 0, "filter": "Median", "kernel": 3, "sobel": "Không dùng",
         })
-        self.assertFalse(result["quality"]["valid"])
-        self.assertIn("ground truth", result["quality"]["reason"])
+        self.assertTrue(result["quality"]["valid"])
+        self.assertEqual(result["quality"]["reference_type"], "Ảnh gốc")
+        self.assertIn("mse", result["quality"])
 
     def test_separate_clean_reference_is_used(self):
         noisy = self.image.copy()
@@ -51,7 +52,7 @@ class TestCoreServices(unittest.TestCase):
             "brightness": 0, "filter": "Median", "kernel": 3, "sobel": "Không dùng",
         }, reference_image=self.image)
         self.assertTrue(result["quality"]["valid"])
-        self.assertEqual(result["quality"]["reference_type"], "Ảnh tham chiếu sạch riêng")
+        self.assertEqual(result["quality"]["reference_type"], "Ảnh tham chiếu riêng")
 
     def test_reference_shape_mismatch_rejected(self):
         with self.assertRaises(ValueError):
